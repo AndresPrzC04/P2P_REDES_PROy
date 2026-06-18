@@ -98,7 +98,7 @@ class Tracker:
             writer.close()
 
     async def run(self, host: str, port: int):
-        server = await asyncio.start_server(self._conn, host, port)
+        server = await asyncio.start_server(self._conn, host, port,limit=16*1024*1024)
         addr = ", ".join(str(s.getsockname()) for s in server.sockets)
         print(f"[tracker] escuchando en {addr}")
         print(f"[tracker] archivo='{self.manifest['file_name']}' "

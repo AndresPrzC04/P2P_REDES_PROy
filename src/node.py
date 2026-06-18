@@ -38,6 +38,7 @@ import os
 import random
 import time
 import uuid
+import socket
 
 import protocol as P
 from manifest import piece_bounds, verify_piece, load_manifest
@@ -107,7 +108,7 @@ class Node:
 
     # ----------------------- cliente del tracker -------------------------
     async def tracker_request(self, req: dict) -> dict:
-        reader, writer = await asyncio.open_connection(self.tracker_host, self.tracker_port)
+        reader, writer = await asyncio.open_connection(self.tracker_host, self.tracker_port,limit=16*1024*1024)
         try:
             writer.write((json.dumps(req) + "\n").encode())
             await writer.drain()
@@ -205,8 +206,34 @@ class Node:
         async with server:
             await server.serve_forever()
 
+    #async def _handle_incoming(self, reader, writer):
+    #    try:
+    #        mtype, payload = await P.read_message(reader)
+    #        if mtype != P.HANDSHAKE:
+    #            writer.close(); return
+    #        info = json.loads(payload.decode())
+    #        if info.get("file_id") != self.manifest["file_id"]:
+    #            writer.close(); return
+    #        their_id = info["node_id"]
+    #        # responde con nuestro handshake + bitfield
+    #        writer.write(P.encode_message(P.HANDSHAKE, json.dumps(
+    #            {"node_id": self.node_id, "file_id": self.manifest["file_id"]}).encode()))
+    #        writer.write(P.encode_message(P.BITFIELD, bytes(self.have)))
+    #        await writer.drain()
+    #        host, port = writer.get_extra_info("peername")[:2]
+    #        await self._register_peer(their_id, host, port, reader, writer)
+    #    except Exception:  # noqa: BLE001
+    #        writer.close()
+
     async def _handle_incoming(self, reader, writer):
         try:
+            # OPTIMIZACIÓN: Ampliar los buffers de red del socket para conexiones entrantes
+            sock = writer.get_extra_info("peername")
+            raw_socket = writer.get_extra_info("socket")
+            if raw_socket:
+                raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024) # 1MB
+                raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024) # 1MB
+
             mtype, payload = await P.read_message(reader)
             if mtype != P.HANDSHAKE:
                 writer.close(); return
@@ -214,7 +241,7 @@ class Node:
             if info.get("file_id") != self.manifest["file_id"]:
                 writer.close(); return
             their_id = info["node_id"]
-            # responde con nuestro handshake + bitfield
+            
             writer.write(P.encode_message(P.HANDSHAKE, json.dumps(
                 {"node_id": self.node_id, "file_id": self.manifest["file_id"]}).encode()))
             writer.write(P.encode_message(P.BITFIELD, bytes(self.have)))
@@ -224,9 +251,36 @@ class Node:
         except Exception:  # noqa: BLE001
             writer.close()
 
+
+    #async def connect(self, host, port):
+    #    try:
+    #        reader, writer = await asyncio.open_connection(host, port)
+    #        writer.write(P.encode_message(P.HANDSHAKE, json.dumps(
+    #            {"node_id": self.node_id, "file_id": self.manifest["file_id"]}).encode()))
+    #        await writer.drain()
+    #        mtype, payload = await P.read_message(reader)
+    #        if mtype != P.HANDSHAKE:
+    #            writer.close(); return
+    #        info = json.loads(payload.decode())
+    #        their_id = info["node_id"]
+    #        writer.write(P.encode_message(P.BITFIELD, bytes(self.have)))
+    #        await writer.drain()
+    #        await self._register_peer(their_id, host, port, reader, writer)
+    #    except Exception:  # noqa: BLE001
+    #        pass
+
+
     async def connect(self, host, port):
         try:
-            reader, writer = await asyncio.open_connection(host, port)
+            # OPTIMIZACIÓN: Pasamos el limit de 16MB aquí también para evitar cuellos de botella
+            reader, writer = await asyncio.open_connection(host, port, limit=16 * 1024 * 1024)
+            
+            # OPTIMIZACIÓN: Ampliar los buffers de red del socket para conexiones salientes
+            raw_socket = writer.get_extra_info("socket")
+            if raw_socket:
+                raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+                raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+
             writer.write(P.encode_message(P.HANDSHAKE, json.dumps(
                 {"node_id": self.node_id, "file_id": self.manifest["file_id"]}).encode()))
             await writer.drain()
@@ -355,8 +409,10 @@ class Node:
     async def _on_complete(self):
         self.finish_time = time.time()
         elapsed = self.finish_time - self.start_time
+
         # verificacion del archivo completo
         self.fh.flush()
+        
         import hashlib
         self.fh.seek(0)
         h = hashlib.sha256()
@@ -368,6 +424,8 @@ class Node:
         ok = h.hexdigest() == self.manifest["file_hash"]
         print(f"[{self.node_id}] COMPLETO en {elapsed:0.2f}s  "
               f"(hash global {'OK' if ok else 'FALLO'})  -> ahora soy SEED")
+        
+        
         self.is_seed = True
         await self.announce("completed")
         self.complete_event.set()

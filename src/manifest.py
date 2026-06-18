@@ -31,11 +31,34 @@ def build_manifest(file_path: str, piece_size: int) -> dict:
     piece_hashes = []
     file_hasher = hashlib.sha256()
 
+    # Buffer de lectura en disco optimizado (ej. 64KB o el tamaño de pieza si es menor)
+    buffer_size = min(65536, piece_size)
+
     with open(file_path, "rb") as f:
         for _ in range(num_pieces):
-            chunk = f.read(piece_size)
-            piece_hashes.append(hashlib.sha256(chunk).hexdigest())
-            file_hasher.update(chunk)
+            # Creamos un bytearray vacío con el tamaño exacto de la pieza
+            # Nota: La última pieza puede ser más corta
+            bytes_left = min(piece_size, file_size - f.tell())
+            piece_buffer = bytearray(bytes_left)
+
+            # Usamos memoryview para llenar el bytearray directamente desde el archivo
+            mv = memoryview(piece_buffer)
+            offset = 0
+
+            while offset < bytes_left:
+                chunk_to_read = min(buffer_size, bytes_left - offset)
+                # Leemos directo al segmento correspondiente de la memoria congelada
+                f.readinto(mv[offset:offset + chunk_to_read])
+                offset += chunk_to_read
+
+            # Pasamos la vista de memoria directamente a los hashers (Cero copias en RAM)
+            piece_hashes.append(hashlib.sha256(mv).hexdigest())
+            file_hasher.update(mv)
+
+
+            #chunk = f.read(piece_size)
+            #piece_hashes.append(hashlib.sha256(chunk).hexdigest())
+            #file_hasher.update(chunk)
 
     return {
         "file_name": os.path.basename(file_path),
